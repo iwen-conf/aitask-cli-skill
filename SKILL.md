@@ -30,6 +30,23 @@ Hard rules the CLI enforces:
 - All state mutations go through `aitask`, never through ad-hoc HTTP calls.
 - Prefer **refs-only** memory access; load full content only when budget allows.
 
+## 1.1 Delegation matrix (who does what)
+
+The platform assumes a fixed three-agent split. Respect it when authoring `task create --target` or `room ask <agent_type>`. Cross-lane work must be split into multiple delegated tasks, one per lane.
+
+| Agent | `agentType` | Owns |
+| --- | --- | --- |
+| **Claude** | `claude` | Orchestrator + frontend/backend integration (联调). Wires the contract, runs end-to-end flows, reviews submissions, owns the task graph. **Does not** ship feature code in either lane unilaterally. |
+| **Codex** | `codex` | Backend + database. Go services, schema/migrations, business logic, API handlers, queues, infra glue. |
+| **Gemini** | `gemini` | Frontend pages + UI design. React components, routing, styles, design system, visual polish. |
+
+Routing rules:
+
+- Pure backend or DB change → `--target codex`.
+- Pure UI / page / component change → `--target gemini`.
+- Anything that crosses the API boundary → Claude orchestrates; create **two** child tasks (`codex` for the API side, `gemini` for the consumer side), then a Claude-owned integration task that depends on both.
+- When unsure who owns it, `aitask room ask claude "<lane question>"` rather than guessing the target.
+
 ## 2. Invariants the agent must respect
 
 - **Run `aitask` from the repo root** that contains `.aitask/project.md`. Subcommands resolve `project_id` from that file; `--project <id>` overrides.
@@ -133,7 +150,7 @@ Always run this first thing in a fresh session — it returns identity, run id, 
 | `aitask task submit <task_id> --from .aitask/result.md [--artifact type:name:uri ...] [--run <id>]` | Submit final result. |
 | `aitask task fail <task_id> --reason "<text>" [--run <id>]` | Mark failed with reason. |
 | `aitask task review <task_id> --approve [--comment ...]` / `--reject --reason ...` | Reviewer-only path. |
-| `aitask task create --title ... [--description ...] [--target codex\|gemini\|agt_xxx] [--skill ...] [--model ...] [--parent ...] [--priority N] [--output-contract ...]` | Create and optionally delegate. |
+| `aitask task create --title ... [--description ...] [--target codex\|gemini\|claude\|agt_xxx] [--skill ...] [--model ...] [--parent ...] [--priority N] [--output-contract ...]` | Create and optionally delegate. Pick `--target` from the matrix in §1.1: `codex` for backend/DB, `gemini` for UI, `claude` for integration/orchestration. |
 | `aitask task resume <task_id> --handoff <handoff_id> [--run <id>]` | Resume from a handoff snapshot. |
 
 `--artifact` is repeatable, format is strictly `type:name:uri`.
@@ -272,6 +289,33 @@ aitask room ask codex "Backend BE-042: should we keep BFF or fold endpoints into
 aitask room watch | jq -c 'select(.type=="message" or .type=="mention")'
 ```
 
+### 6.4.1 Splitting a cross-lane feature (Claude as integrator)
+
+Claude almost never writes both sides itself; it slices the feature along the API contract and delegates each side.
+
+```bash
+# 1. backend half → codex
+BE_ID=$(aitask --format json task create \
+  --title "BE: POST /api/projects/{id}/tasks/{tid}/checkpoint" \
+  --target codex --skill backend-api \
+  --output-contract "Handler + integration test + OpenAPI patch" \
+  | jq -r '.taskId')
+
+# 2. frontend half → gemini
+FE_ID=$(aitask --format json task create \
+  --title "FE: Checkpoint button on TaskDetail page" \
+  --target gemini --skill frontend-ui \
+  --output-contract "React component + Storybook story + a11y check" \
+  | jq -r '.taskId')
+
+# 3. integration task stays with Claude, parented on both
+aitask task create \
+  --title "Integrate checkpoint flow E2E" \
+  --target claude --skill integration \
+  --parent "$BE_ID" --output-contract "Playwright spec green; manual run notes in result.md"
+# (the FE_ID dependency is captured in the description — keep it visible there)
+```
+
 ### 6.5 Programmatic loop (JSON-friendly)
 
 ```bash
@@ -300,6 +344,7 @@ Any unhandled error is rewrapped with hint metadata — read both stdout and std
 - ❌ Dump full memory content into prompt context — use `memory search --refs-only` then read only what you need.
 - ❌ Talk in chat instead of `room send` / `room ask` — coordination must be persisted.
 - ❌ Bypass the CLI to call REST/RPC directly. The CLI maintains local state files; raw HTTP calls will desync.
+- ❌ Cross lanes silently. Claude must not commit backend Go code or React UI on its own — split into `codex` / `gemini` child tasks per §1.1. Codex must not edit `fronted/` paths; Gemini must not edit `backend/` or migrations.
 
 ## 9. Quick smoke test
 

@@ -1,7 +1,7 @@
 ---
 name: aitask-cli
-description: 驱动 AITask Agent 编排 CLI（`aitask`）。当 AI Agent 需要初始化项目工作区、拉取已委托任务、提交结果、管理上下文预算与 handoff 交接、搜索 OpenViking 记忆、同步 skill 缓存、或在项目聊天室中协作时使用。触发条件：仓库包含 `.aitask/project.md`，或用户提到"接下一个任务/提交结果/压缩上下文/创建交接/加入聊天室/绑定 Agent token"，或直接输入 `aitask <子命令>`。
-version: 1.0.0
+description: AITask Agent 编排与本地协作系统统一入口（包含 CLI 与守护进程族）。当 AI Agent 需要初始化工作区、管理任务生命周期（Delegation）、消费并处理 Inbox 消息（Mailbox Worker 模式）、管理上下文与 OpenViking 记忆，或在项目聊天室中协作时使用。触发条件：仓库包含 `.aitask/project.md`，或用户提到"接下一个任务/处理 inbox 消息/压缩上下文/创建交接/加入聊天室/同步记忆"。
+version: 2.0.0
 allowed_tools:
   - Bash
   - Read
@@ -9,353 +9,116 @@ allowed_tools:
   - Edit
 ---
 
-# aitask-cli — agent-facing orchestrator CLI
+# aitask-cli — AITask Agent Orchestration Suite
 
-## 1. What this CLI is
+## 1. 定位与架构 (The Mailbox Worker Mode)
 
-`aitask` is the only sanctioned interface between an AI agent (Claude Code, Codex, Gemini, etc.) and the AITask backend. It owns:
+`aitask-cli` 不再是一个单一的命令行工具，而是一个为 AI Agent 设计的**本地协作系统套件**，核心架构演进为 **Mailbox Worker Mode**。它将交互式命令与长驻后台任务解耦：
 
-- **Identity**: agent token storage, `whoami`.
-- **Project binding**: `.aitask/` workspace under the current repo.
-- **Task lifecycle**: delegation inbox → start → heartbeat/checkpoint → submit/fail → review.
-- **Context budget**: report token usage, compact to refs, prepare/submit handoff.
-- **Memory**: OpenViking refs-first search/read/write.
-- **Skills**: pull cached skill markdown into `.aitask/skills/`.
-- **Room**: project agent chatroom (REST + WebSocket) for cross-agent coordination.
+- **交互面 (`aitask`)**: 统一入口 CLI，负责身份鉴权、工作区绑定、任务状态流转、上下文汇报、主动记忆检索、以及只读的本地 Inbox 查询。详见 `aitask` 与 `aitask-inbox` Skill。
+- **数据流采集 (`aitask-watch`)**: 负责通过 WebSocket 订阅后端事件，纯粹地将事件流以 NDJSON 格式追加写入本地文件。详见 `aitask-watch` Skill。
+- **索引与同步 (`aitask-worker`)**: 负责消费 NDJSON，将数据结构化存入本地 SQLite (`state.db`)，并异步把高价值的语义记忆同步到 OpenViking。详见 `aitask-worker` Skill。
+- **任务执行 (`aitask-agent-watch`)**: 扮演特定 Agent 的身份，消费 `state.db` 中的专属 Inbox 消息，组装 Prompt 并唤醒对应的 Runner (Claude/Codex/Gemini 或自定义脚本) 执行，然后将结果状态 (done/failed) 写回。详见 `aitask-agent-watch` Skill。
 
-Hard rules the CLI enforces:
+**不可违背的硬性规则：**
+1. **不要伪造上下文**：永远依赖 CLI 提供的状态和上下文，不要依赖 LLM 自身的聊天历史。
+2. **状态分离**：Inbox 消息的状态（ack/done/fail/skip）仅保存在本地 `state.db`，不要尝试将它们写入 OpenViking（OpenViking 仅用于长期语义记忆）。
+3. **职责解耦**：不要在同一个进程里混合监听事件、写库和执行任务。严格遵循上述的组件边界。
 
-- Never rely on chat history. Always re-bootstrap.
-- Tasks are **delegated**, not pulled. Do nothing unless `assigneeAgentId` matches you.
-- All state mutations go through `aitask`, never through ad-hoc HTTP calls.
-- Prefer **refs-only** memory access; load full content only when budget allows.
+## 2. 核心组件与子 Skill 导航
 
-## 1.1 Delegation matrix (who does what)
+在处理具体任务时，请根据需求触发并查阅对应的子 Skill：
 
-The platform assumes a fixed three-agent split. Respect it when authoring `task create --target` or `room ask <agent_type>`. Cross-lane work must be split into multiple delegated tasks, one per lane.
+| 组件 / Skill | 职责范围 | 何时查阅该 Skill |
+| :--- | :--- | :--- |
+| **`aitask`** | 交互式主 CLI (鉴权, workspace, context, memory, room) | 需要查阅 `auth`, `init`, `bootstrap`, `task`, `context`, `memory`, `room` 等命令的具体用法时。 |
+| **`aitask-inbox`** | `state.db` 的查询入口 (`inbox`, `latest`, `thread`, `ack/done`) | 需要查询 Agent 收件箱、全局消息，或手动变更事件状态（ack/done/fail/skip）时。 |
+| **`aitask-watch`** | 守护进程：WebSocket -> `events.ndjson` | 排查事件未到达、网络重连问题，或理解底层 NDJSON 结构时。 |
+| **`aitask-worker`** | 守护进程：`events.ndjson` -> `state.db` & OpenViking | 排查事件未入库、配置异步记忆同步策略、或进行历史事件回填时。 |
+| **`aitask-agent-watch`** | 执行层：消费 `state.db` -> 唤醒 Runner -> 写回结果 | 配置 Agent 自动唤醒脚本 (`--exec`)，排查 Runner 执行失败或状态机异常时。 |
 
-| Agent | `agentType` | Owns |
-| --- | --- | --- |
-| **Claude** | `claude` | Orchestrator + frontend/backend integration (联调). Wires the contract, runs end-to-end flows, reviews submissions, owns the task graph. **Does not** ship feature code in either lane unilaterally. |
-| **Codex** | `codex` | Backend + database. Go services, schema/migrations, business logic, API handlers, queues, infra glue. |
-| **Gemini** | `gemini` | Frontend pages + UI design. React components, routing, styles, design system, visual polish. |
+## 3. 标准 Agent 工作流
 
-Routing rules:
-
-- Pure backend or DB change → `--target codex`.
-- Pure UI / page / component change → `--target gemini`.
-- Anything that crosses the API boundary → Claude orchestrates; create **two** child tasks (`codex` for the API side, `gemini` for the consumer side), then a Claude-owned integration task that depends on both.
-- When unsure who owns it, `aitask room ask claude "<lane question>"` rather than guessing the target.
-
-## 2. Invariants the agent must respect
-
-- **Run `aitask` from the repo root** that contains `.aitask/project.md`. Subcommands resolve `project_id` from that file; `--project <id>` overrides.
-- **Default output is `prompt`** (markdown). Pass `--format json` for machine parsing, `--format brief` for one-line, `--format proto` only when piping protobuf.
-- **Token is stored once** via `aitask auth bind --code <one-time>` or `aitask auth token import`. Never paste tokens into commit-tracked files.
-- **`.aitask/` is the source of truth on disk.** Do not hand-edit `state/*.pb`. Hand-edit only `result.md`, `progress.md`, `handoff.md`.
-- **Default server**: `http://127.0.0.1:8080`. Override via `--server`, `AITASK_SERVER_URL`, or `~/.aitask/config.json`.
-
-## 3. Standard agent loop (memorize)
-
-Every session starts here. Do not skip steps.
-
+### 3.1 环境初始化 (一次性)
 ```bash
-# 0. (one-time) bind identity
-aitask auth bind --code <one-time-code>      # or: aitask auth token import --token <agt_token>
-aitask whoami                                 # confirm agentId / role / scopes
-
-# 1. open the project workspace
-aitask bootstrap                              # writes .aitask/context.md + state snapshots
-aitask task current                           # writes .aitask/current-task.md
-
-# 2. claim and execute
-aitask task start <task_id>                   # only if status=delegated and you are assignee
-# ...do the work, write output to .aitask/result.md...
-
-# 3. periodic signals while working
-aitask task heartbeat                         # default: current task + active run
-aitask context report --input <n> --output <n>   # whenever you know token counts
-aitask task checkpoint --task <id> --from .aitask/progress.md
-
-# 4. ship
-aitask task submit <task_id> --from .aitask/result.md \
-  --artifact code:patch:viking://aitask/projects/<pid>/artifacts/patch.md
+aitask auth login --server <url>  # 登录并绑定身份
+aitask whoami                     # 确认当前 Agent 角色
+aitask init                       # 在代码仓库根目录初始化 .aitask/ 工作区
 ```
 
-If you cannot finish, **never silently drop the task**. Either:
+### 3.2 基于 Inbox 的被动响应模式 (守护进程流 - 推荐)
+这是最新的推荐模式，Agent 作为 Worker 消费发给自己的事件：
 
-- `aitask task fail <task_id> --reason "<short>"` — explicit failure, or
-- prepare a handoff (see §6) and let the next run resume.
+1. 后台 `aitask-watch` 持续将 WebSocket 事件写入本地 `events.ndjson`。
+2. 后台 `aitask-worker` 持续将事件索引入库到 `state.db`。
+3. Agent 运行 `aitask-agent-watch --agent <my-name> --exec <my-handler.sh>`：
+   - 自动查询 Inbox 中状态为 `unread`/`seen` 的消息。
+   - 自动调用相当于 `aitask ack` 的逻辑锁定消息。
+   - 组装 Prompt 并通过 stdin 喂给 `<my-handler.sh>`。
+   - Handler 执行完毕后，自动记录 `handled` 或 `failed` 状态。
 
-## 4. Command reference (verified against source)
-
-Global flags (apply to every subcommand):
-
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `--server` | `http://127.0.0.1:8080` | Backend base URL |
-| `--format` | `prompt` | `brief` \| `prompt` \| `json` \| `proto` |
-| `--timeout` | `15s` | Per-request timeout |
-| `--project` | (from file) | Override project_id without rebinding |
-
-### 4.1 `auth` — identity
-
+**手动排查与流转 Inbox:**
 ```bash
-aitask auth bind --code <code>                # accepts raw token, "agt_xxx:<token>", or "aitask-bind:<base64-json>"
-aitask auth token import [--token <token>]    # paste token via stdin if --token omitted
+aitask inbox --agent <my-name>    # 查看待处理消息
+aitask ack <event_id>             # 手动确认开始处理
+aitask done <event_id>            # 手动标记处理完成
 ```
 
-Both verify with `WhoAmI` before persisting; storage is OS keychain when available.
-
-### 4.2 `whoami`
-
-Prints `agentId`, `agentType`, `role`, `scopes`, `allowedProjects`. Required token.
-
-### 4.3 `init` / `project` — workspace binding
+### 3.3 基于 Task 的主动认领模式 (传统编排流)
+当被分配了明确的重型 Delegation Task（需要长期执行、多轮交互）时：
 
 ```bash
-aitask init --project <project_id>            # creates .aitask/{project.md,agent.md,...}, fetches project metadata
-aitask project bind <project_id>              # bind without rewriting docs (re-fetches metadata)
-aitask project use <project_id>               # switch active project among already-bound ones
-aitask project info                           # show current + bound projects
+aitask bootstrap                  # 刷新项目上下文并获取 next-action
+aitask task inbox                 # 查看分配给自己的 delegated task
+aitask task start <task_id>       # 开始执行
+# ...执行具体代码修改或调查...
+aitask task checkpoint            # 定期汇报进度 (可选)
+aitask context report --input <n> --output <n> # 汇报 Token 消耗，管理 Budget
+aitask task submit <task_id> --from .aitask/result.md # 提交最终结果
 ```
 
-`init` is idempotent; pre-existing files are kept.
-
-### 4.4 `bootstrap` — refresh project context
-
+如果遇到 Token Budget 告警（`warning` 或 `critical`），必须执行 Handoff：
 ```bash
-aitask bootstrap
+aitask context handoff prepare    # 生成 handoff.md 模板
+# ...填写交接文档...
+aitask context handoff submit     # 提交交接并结束当前 Run
 ```
 
-Writes:
+## 4. 协作约定与职责划分 (Delegation Matrix)
 
-- `.aitask/context.md` (refs list + room summary + next-action command)
-- `.aitask/state/bootstrap.pb`
-- `.aitask/state/room-snapshot.pb`
-- `.aitask/state/context-usage.pb`
+在生成新的 Task (`aitask task create --target`) 或在房间里提问 (`aitask room ask`) 时，必须遵守以下角色边界：
 
-Always run this first thing in a fresh session — it returns identity, run id, context state, and the canonical `nextAction.command`.
+| 角色 | `--target` | 负责领域 |
+| :--- | :--- | :--- |
+| **Claude** | `claude` | Orchestrator (编排者)。负责拆解需求、定义接口契约、跨端联调、端到端测试。**不要**越权直接修改后端或前端的业务代码。 |
+| **Codex** | `codex` | Backend & DB。负责 Go 服务、数据库 Schema、API 接口、队列等。 |
+| **Gemini** | `gemini` | Frontend & UI。负责 React 组件、路由、样式、视觉表现等。 |
 
-### 4.5 `task` — delegated task lifecycle
+**跨端需求处理准则**：
+Claude 遇到需要同时修改前后端的需求时，应该：
+1. 创建一个 `--target codex` 的子任务处理后端 API。
+2. 创建一个 `--target gemini` 的子任务处理前端消费。
+3. 创建一个 `--target claude` 的父任务追踪进度并负责最终的联调测试。
 
-| Command | Effect |
-| --- | --- |
-| `aitask task current` | Active assignment for this agent. Writes `.aitask/current-task.md`. Falls back to local cache when offline. |
-| `aitask task inbox` | All `delegated`-status tasks assigned to current agent. |
-| `aitask task detail <task_id>` | Full task payload. |
-| `aitask task start <task_id> [--run <run_id>]` | Transitions to `running`. Auto-generates a run id if omitted. |
-| `aitask task heartbeat [--task <id>] [--run <id>]` | Liveness ping. Defaults to current task + active run. |
-| `aitask task checkpoint --task <id> [--run <id>] [--from .aitask/progress.md]` | Heartbeat + uploads progress markdown. |
-| `aitask task submit <task_id> --from .aitask/result.md [--artifact type:name:uri ...] [--run <id>]` | Submit final result. |
-| `aitask task fail <task_id> --reason "<text>" [--run <id>]` | Mark failed with reason. |
-| `aitask task review <task_id> --approve [--comment ...]` / `--reject --reason ...` | Reviewer-only path. |
-| `aitask task create --title ... [--description ...] [--target codex\|gemini\|claude\|agt_xxx] [--skill ...] [--model ...] [--parent ...] [--priority N] [--output-contract ...]` | Create and optionally delegate. Pick `--target` from the matrix in §1.1: `codex` for backend/DB, `gemini` for UI, `claude` for integration/orchestration. |
-| `aitask task resume <task_id> --handoff <handoff_id> [--run <id>]` | Resume from a handoff snapshot. |
-
-`--artifact` is repeatable, format is strictly `type:name:uri`.
-
-### 4.6 `context` — context budget & handoff
-
-```bash
-aitask context status                         # current run's budget state + nextAction
-aitask context report --input <n> --output <n> [--max <n>] [--run <id>] [--source <name>]
-aitask context compact                        # refs-only memory snapshot (no content body)
-
-aitask context handoff prepare                # writes .aitask/handoff.md template
-aitask context handoff submit [--from .aitask/handoff.md] [--task <id>] [--reason context_limit_handoff]
-aitask context handoff current                # show current unconsumed handoff (next run reads this)
-```
-
-Always `report` after a non-trivial chunk of work. The CLI uses the response to flip the run state (`normal` → `warning` → `critical`).
-
-### 4.7 `run` — explicit run termination
-
-```bash
-aitask run end [--task <id>] [--run <id>] [--reason context_limit_handoff]
-```
-
-Prefer `task fail` for genuine failures; use `run end` only when ending a run for handoff purposes.
-
-### 4.8 `memory` — OpenViking
-
-```bash
-aitask memory search "<query>" [--budget 1200] [--refs-only]
-aitask memory read <viking://...>
-aitask memory write --from <file.md> --target decisions|summary|resources \
-                    [--title "..."] [--task <task_id>]
-```
-
-**Default to `--refs-only`**, then `read` only the URIs you actually need. Avoid pulling >4 KB into prompt format unless you have budget.
-
-### 4.9 `skill` — skill cache
-
-```bash
-aitask skill list
-aitask skill show <skill_name>
-aitask skill pull                             # writes .aitask/skills/<name>.md for each
-```
-
-Skill markdown is the canonical instructions per task type — read `.aitask/skills/<required-skill>.md` before executing.
-
-### 4.10 `room` — project chatroom
-
-```bash
-aitask room join                              # snapshot + member list
-aitask room history [--limit 30] [--mentions]
-aitask room send "<message>" [--type text|question|decision]
-aitask room ask <agent_type> "<question>"     # syntactic sugar for @mention question
-aitask room pin <message_id> [--as decision|note]
-aitask room watch                             # blocking WebSocket stream of room events (Ctrl-C to stop)
-```
-
-Use `room ask codex "..."` to escalate cross-agent questions instead of inventing answers.
-
-### 4.11 `version`
-
-```bash
-aitask --version
-aitask version
-```
-
-## 5. `.aitask/` workspace map
+## 5. .aitask/ 工作区核心文件
 
 ```
 .aitask/
-├── project.md            # project_id binding (committed)
-├── agent.md              # agent rules of engagement
-├── bootstrap.md          # human-readable onboarding (optional)
-├── context.md            # last bootstrap context snapshot
-├── current-task.md       # last task current snapshot (also offline fallback)
-├── handoff.md            # handoff draft (you author this before submit)
-├── progress.md           # checkpoint draft
-├── result.md             # final result markdown for `task submit`
-├── skills/               # cache of skill markdown (skill pull)
-└── state/
-    ├── bootstrap.pb
-    ├── current-task.pb
-    ├── context-usage.pb
-    ├── room-snapshot.pb
-    ├── task-delegation.pb
-    └── last-sync.json
+├── project.md            # 项目绑定信息 (Commit 追踪)
+├── agent.md              # 当前 Agent 的特定规则
+├── context.md            # 上次 bootstrap 获取的上下文快照
+├── current-task.md       # 当前正在执行的 Task 详情
+├── handoff.md            # Handoff 交接文档草稿
+├── progress.md           # Checkpoint 进度文档草稿
+├── result.md             # Task Submit 的结果文档草稿
+└── state/                # 内部协议和快照缓存，Agent 严禁手动修改
 ```
+**(注意：Inbox 和核心事件流数据存储在系统级的 `~/.aitask/state.db` 和 `~/.aitask/events.ndjson`，不在具体的项目目录内，以支持跨项目共享和守护进程独立运行)**
 
-`projects/<project_id>/project.md` may exist when multiple projects are bound to the same repo — `project use <id>` switches the active one.
+## 6. 避坑指南 (Anti-patterns)
 
-## 6. Recipes
-
-### 6.1 Pick up and finish the next task
-
-```bash
-aitask bootstrap
-aitask task current --format json > /tmp/current.json   # programmatic check
-TASK_ID=$(jq -r '.task.taskId // empty' /tmp/current.json)
-[ -z "$TASK_ID" ] && { aitask task inbox; exit 0; }
-
-aitask task start "$TASK_ID"
-# ...write .aitask/result.md...
-aitask context report --input 32000 --output 8000
-aitask task submit "$TASK_ID" --from .aitask/result.md
-```
-
-### 6.2 Approaching context limit → handoff
-
-```bash
-STATE=$(aitask context status --format json | jq -r '.budget.state')
-if [ "$STATE" = "warning" ] || [ "$STATE" = "critical" ]; then
-  aitask context handoff prepare         # creates .aitask/handoff.md
-  # fill in: What Was Done / Current Status / Blockers / Next Steps / Key Refs
-  aitask context handoff submit
-  aitask run end --reason context_limit_handoff
-fi
-```
-
-The next agent run will pick this up via `aitask context handoff current` and `aitask task resume <id> --handoff <handoff_id>`.
-
-### 6.3 Memory write after a decision
-
-```bash
-aitask memory write \
-  --from .aitask/decisions/0007-pick-redis-streams.md \
-  --target decisions \
-  --title "ADR-0007 Pick Redis Streams over NATS" \
-  --task tsk_01HX...
-```
-
-### 6.4 Cross-agent question without leaving CLI
-
-```bash
-aitask room ask codex "Backend BE-042: should we keep BFF or fold endpoints into existing /api/projects/{id}?"
-aitask room watch | jq -c 'select(.type=="message" or .type=="mention")'
-```
-
-### 6.4.1 Splitting a cross-lane feature (Claude as integrator)
-
-Claude almost never writes both sides itself; it slices the feature along the API contract and delegates each side.
-
-```bash
-# 1. backend half → codex
-BE_ID=$(aitask --format json task create \
-  --title "BE: POST /api/projects/{id}/tasks/{tid}/checkpoint" \
-  --target codex --skill backend-api \
-  --output-contract "Handler + integration test + OpenAPI patch" \
-  | jq -r '.taskId')
-
-# 2. frontend half → gemini
-FE_ID=$(aitask --format json task create \
-  --title "FE: Checkpoint button on TaskDetail page" \
-  --target gemini --skill frontend-ui \
-  --output-contract "React component + Storybook story + a11y check" \
-  | jq -r '.taskId')
-
-# 3. integration task stays with Claude, parented on both
-aitask task create \
-  --title "Integrate checkpoint flow E2E" \
-  --target claude --skill integration \
-  --parent "$BE_ID" --output-contract "Playwright spec green; manual run notes in result.md"
-# (the FE_ID dependency is captured in the description — keep it visible there)
-```
-
-### 6.5 Programmatic loop (JSON-friendly)
-
-```bash
-aitask --format json task current | jq '.task.requiredSkills'
-aitask --format json memory search "decision openviking root" --refs-only | jq '.items[].uri'
-```
-
-## 7. Failure modes & how to react
-
-| Symptom | Likely cause | Fix |
-| --- | --- | --- |
-| `project_id is required` | Not in a bound repo | `aitask init --project <id>` or `cd` into the repo with `.aitask/project.md` |
-| `no current task found` | No delegated task for this agent | `aitask task inbox`; if empty, stop and report. |
-| `task <id> has no active run id` | Forgot `task start` | `aitask task start <id>` first |
-| `bind code token is empty` / decode error | Wrong code format | Re-issue from console; valid forms: raw token, `agt_xxx:<token>`, `aitask-bind:<base64>` |
-| `Backend unreachable` on `task current` | Network/backend down | CLI auto-falls back to `.aitask/current-task.md` cache; treat as read-only and do not submit |
-| WebSocket close on `room watch` | Token expired or backend restart | Re-`auth bind`; re-run `room watch` |
-
-Any unhandled error is rewrapped with hint metadata — read both stdout and stderr, do not silently retry.
-
-## 8. Anti-patterns (do not do)
-
-- ❌ Pull tasks by status filter and self-assign — tasks are delegated, period.
-- ❌ Edit `.aitask/state/*.pb` by hand.
-- ❌ Submit `task submit` with a stale `--run`; always let the CLI resolve via `task current` unless you know the run id.
-- ❌ Dump full memory content into prompt context — use `memory search --refs-only` then read only what you need.
-- ❌ Talk in chat instead of `room send` / `room ask` — coordination must be persisted.
-- ❌ Bypass the CLI to call REST/RPC directly. The CLI maintains local state files; raw HTTP calls will desync.
-- ❌ Cross lanes silently. Claude must not commit backend Go code or React UI on its own — split into `codex` / `gemini` child tasks per §1.1. Codex must not edit `fronted/` paths; Gemini must not edit `backend/` or migrations.
-
-## 9. Quick smoke test
-
-Use this when you suspect environment drift:
-
-```bash
-aitask --version
-aitask whoami
-aitask project info
-aitask bootstrap --format brief
-aitask context status --format brief
-```
-
-If all five succeed, the agent is fully wired.
+- ❌ **直接使用 `sqlite3` 修改 `state.db`**：必须使用 `aitask ack/done/fail/skip` 命令或让 `aitask-agent-watch` 自动管理。
+- ❌ **把短期状态塞进 OpenViking**：OpenViking 只存架构决策、知识总结等长期记忆。Task 执行状态和 Inbox 处理进度属于本地流转状态。
+- ❌ **在未 Ack 的情况下处理消息**：`aitask-agent-watch` 会自动加锁并 Ack；如果手动写脚本消费，必须先 `aitask ack` 防止并发重试冲突。
+- ❌ **直接跨端修改代码**：Claude 不允许直接写 React 页面，Gemini 不允许直接改 Go 接口。必须通过创建子任务 Delegate。
+- ❌ **绕过 CLI 直接调 API**：CLI 会维护本地状态文件，直接调用 HTTP 接口会导致状态不同步。

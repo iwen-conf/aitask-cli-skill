@@ -1,0 +1,11 @@
+{
+  "name": "aitask-cli",
+  "description": "AITask Agent 编排与本地协作系统 skill bundle —— Mailbox Worker Mode 的 CLI、采集器、消化器、Inbox、Agent Watch 全栈。",
+  "version": "3.0.0",
+  "author": {
+    "name": "iwen-conf"
+  },
+  "homepage": "https://github.com/iwen-conf/aitask-cli-skill",
+  "repository": "https://github.com/iwen-conf/aitask-cli-skill",
+  "license": "MIT"
+}

@@ -69,7 +69,7 @@ cp -R /tmp/aitask-cli-skill ~/.claude/plugins/aitask-cli
 
 | Skill | Triggers |
 | --- | --- |
-| `aitask-cli:aitask-cli` | Repo contains `.aitask/project.md`; user mentions task pickup / submit / handoff / room / token bind; user types `aitask <subcommand>`; user asks about AITask daemons, inbox, worker, watcher, OpenViking memory, or agent wake flows. |
+| `aitask-cli:aitask-cli` | Repo contains `.aitask/project.md`; user mentions task pickup / submit / handoff / room / token bind; user types `aitask <subcommand>`; user asks about AITask daemons, inbox, worker, watcher, project context, or agent wake flows. |
 
 ## License
 

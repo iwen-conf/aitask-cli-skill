@@ -1,19 +1,14 @@
-# aitask-cli plugin bundle
+# aitask-cli plugin
 
-A Claude Code plugin that bundles six skills for driving the
+A Claude Code plugin that bundles one skill for driving the
 [`aitask`](https://github.com/iwen-conf/aitask-cli) CLI and its companion
 daemons — the agent-facing orchestrator stack for the AITask platform.
 
-## Skills in this plugin
+## Skill in this plugin
 
 | Skill (namespaced) | Path | What it covers |
 | --- | --- | --- |
-| `aitask-cli:aitask-cli` | [`skills/aitask-cli/SKILL.md`](skills/aitask-cli/SKILL.md) | Top-level orchestrator skill: delegation matrix, every `aitask` subcommand, standard agent loop, recipes, failure modes, anti-patterns. |
-| `aitask-cli:aitask` | [`skills/aitask/SKILL.md`](skills/aitask/SKILL.md) | Chinese command-surface companion: `inbox`, `render-prompt`, `openviking config`, `search`, `summary`, compat entries (`events` / `worker` / `watch`). |
-| `aitask-cli:aitask-watch` | [`skills/aitask-watch/SKILL.md`](skills/aitask-watch/SKILL.md) | WebSocket event-stream daemon. NDJSON append, system notifications, hooks integration. |
-| `aitask-cli:aitask-worker` | [`skills/aitask-worker/SKILL.md`](skills/aitask-worker/SKILL.md) | Local indexer + OpenViking sync daemon. Includes the valuable-kinds whitelist and ingest pipeline. |
-| `aitask-cli:aitask-agent-watch` | [`skills/aitask-agent-watch/SKILL.md`](skills/aitask-agent-watch/SKILL.md) | Per-agent inbox executor. `--exec` / `--wake` runner invocation, state machine, prompt rendering. |
-| `aitask-cli:aitask-inbox` | [`skills/aitask-inbox/SKILL.md`](skills/aitask-inbox/SKILL.md) | The `aitask inbox` / `latest` / `thread` / `ack` / `done` / `fail` / `skip` query family. |
+| `aitask-cli:aitask-cli` | [`skills/aitask-cli/SKILL.md`](skills/aitask-cli/SKILL.md) | Unified orchestrator skill: delegation matrix, `aitask` command surface, daemon roles, standard agent loop, recipes, failure modes, and anti-patterns. |
 
 ## Layout
 
@@ -22,12 +17,7 @@ aitask-cli-skill/
 ├── .claude-plugin/
 │   └── plugin.json
 └── skills/
-    ├── aitask-cli/SKILL.md
-    ├── aitask/SKILL.md
-    ├── aitask-watch/SKILL.md
-    ├── aitask-worker/SKILL.md
-    ├── aitask-agent-watch/SKILL.md
-    └── aitask-inbox/SKILL.md
+    └── aitask-cli/SKILL.md
 ```
 
 Skills are auto-discovered — no need to list them in `plugin.json`.
@@ -79,12 +69,7 @@ cp -R /tmp/aitask-cli-skill ~/.claude/plugins/aitask-cli
 
 | Skill | Triggers |
 | --- | --- |
-| `aitask-cli:aitask-cli` | Repo contains `.aitask/project.md`; user mentions task pickup / submit / handoff / room / token bind; user types `aitask <subcommand>`. |
-| `aitask-cli:aitask` | Same triggers, used as the Chinese command-surface reference. |
-| `aitask-cli:aitask-watch` | User mentions WebSocket event subscription, NDJSON, `events.ndjson`, system notifications, hooks auto-launch, `aitask events`. |
-| `aitask-cli:aitask-worker` | User mentions `state.db` indexing, OpenViking sync, `--memory openviking`, daemon/once cycles, backfill, valuable kinds. |
-| `aitask-cli:aitask-agent-watch` | User mentions `--wake`, `--exec` handler scripts, prompt rendering, runner invocation, inbox state machine. |
-| `aitask-cli:aitask-inbox` | User mentions `aitask inbox`, `latest`, `thread`, `ack` / `done` / `fail` / `skip`, or "为什么我的 inbox 是空的". |
+| `aitask-cli:aitask-cli` | Repo contains `.aitask/project.md`; user mentions task pickup / submit / handoff / room / token bind; user types `aitask <subcommand>`; user asks about AITask daemons, inbox, worker, watcher, OpenViking memory, or agent wake flows. |
 
 ## License
 

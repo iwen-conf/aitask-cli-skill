@@ -1,7 +1,7 @@
 {
   "name": "aitask-cli",
-  "description": "AITask Agent 编排与本地协作系统 skill bundle —— Mailbox Worker Mode 的 CLI、采集器、消化器、Inbox、Agent Watch 全栈。",
-  "version": "3.0.0",
+  "description": "Single-purpose AITask project room chat skill for Claude Code, Codex, and Gemini.",
+  "version": "3.2.0",
   "author": {
     "name": "iwen-conf"
   },

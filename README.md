@@ -1,18 +1,20 @@
 # aitask-cli plugin
 
-A Claude Code plugin that bundles one skill for driving the
-[`aitask`](https://github.com/iwen-conf/aitask-cli) CLI and its companion
-daemons — the agent-facing orchestrator stack for the AITask platform.
+A Claude Code plugin that bundles one single-purpose skill for using `aitask`
+as a project chatroom CLI.
 
-## Skill in this plugin
+The product surface is intentionally small: project binding, room entry, room
+history, and chat messages between Claude Code, Codex, and Gemini.
 
-| Skill (namespaced) | Path | What it covers |
+## Skill
+
+| Skill | Path | What it covers |
 | --- | --- | --- |
-| `aitask-cli:aitask-cli` | [`skills/aitask-cli/SKILL.md`](skills/aitask-cli/SKILL.md) | Unified orchestrator skill: delegation matrix, `aitask` command surface, daemon roles, standard agent loop, recipes, failure modes, and anti-patterns. |
+| `aitask-cli:aitask-cli` | [`skills/aitask-cli/SKILL.md`](skills/aitask-cli/SKILL.md) | Project binding, room join/history, direct Agent questions, room messages, and safe token binding. |
 
 ## Layout
 
-```
+```text
 aitask-cli-skill/
 ├── .claude-plugin/
 │   └── plugin.json
@@ -20,13 +22,7 @@ aitask-cli-skill/
     └── aitask-cli/SKILL.md
 ```
 
-Skills are auto-discovered — no need to list them in `plugin.json`.
-
 ## Install
-
-### Local development / testing
-
-Clone and load with `--plugin-dir`:
 
 ```bash
 git clone https://github.com/iwen-conf/aitask-cli-skill.git
@@ -39,37 +35,11 @@ Reload after edits:
 /reload-plugins
 ```
 
-### Via marketplace
+## Trigger
 
-Once published to a marketplace, install with:
-
-```text
-/plugin install aitask-cli@<marketplace-name>
-```
-
-See [Discover and install plugins](https://code.claude.com/docs/en/discover-plugins).
-
-### Manual project-level install (no marketplace)
-
-```bash
-git clone --depth=1 https://github.com/iwen-conf/aitask-cli-skill.git /tmp/aitask-cli-skill
-mkdir -p .claude/plugins
-cp -R /tmp/aitask-cli-skill .claude/plugins/aitask-cli
-```
-
-### Manual user-global install
-
-```bash
-git clone --depth=1 https://github.com/iwen-conf/aitask-cli-skill.git /tmp/aitask-cli-skill
-mkdir -p ~/.claude/plugins
-cp -R /tmp/aitask-cli-skill ~/.claude/plugins/aitask-cli
-```
-
-## When each skill loads
-
-| Skill | Triggers |
-| --- | --- |
-| `aitask-cli:aitask-cli` | Repo contains `.aitask/project.md`; user mentions task pickup / submit / handoff / room / token bind; user types `aitask <subcommand>`; user asks about AITask daemons, inbox, worker, watcher, project context, or agent wake flows. |
+Load the skill when a repo contains `.aitask/project.md`, the user mentions
+AITask room/chat, or an Agent needs to bind a project, join the room, read room
+history, send a message, or ask another Agent.
 
 ## License
 

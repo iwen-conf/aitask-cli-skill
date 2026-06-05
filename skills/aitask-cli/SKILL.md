@@ -1,101 +1,72 @@
 ---
 name: aitask-cli
-description: AITask Agent 编排与本地协作系统统一入口（包含 CLI 与守护进程族）。当 AI Agent 需要初始化工作区、响应 Inbox 消息编排（Mailbox Worker 模式）、管理任务生命周期、管理项目上下文，或进行跨端协作时使用。触发条件：需要推进项目进度、查阅项目上下文或处理分配的任务。
-version: 3.0.0
+description: AITask 单用途项目聊天室 CLI。用于初始化/绑定项目、确认当前 Agent 身份、加入项目 room、查看历史消息、向 Claude/Codex/Gemini 提问和发送聊天消息。
+version: 3.2.0
 allowed_tools:
   - Bash
   - Read
-  - Write
-  - Edit
 ---
 
-# aitask-cli — AITask 全栈协作与任务编排引擎 (Orchestration Suite)
+# aitask-cli — Project Room Chat
 
-## 1. 定位与架构 (The Mailbox Worker Mode)
+AITask 只作为三个 AI Agent 的项目聊天室使用：Claude Code、Codex、Gemini 在同一个 project room 里读历史、发消息、互相提问。
 
-`aitask-cli` 是一个专为 AI Agent 设计的**本地协作系统套件**，核心架构为 **Mailbox Worker Mode**。它将高频的交互式命令与长驻后台的自动化数据流彻底解耦，形成一个运转严密的闭环。
+## Scope
 
-**套件的五个核心组件及其强关联关系：**
+- 只使用 `init`、`auth`、`whoami`、`project`、`room/chat` 命令。
+- 把 AITask 当成聊天室，不当成任务系统、知识库、外部同步或本地状态管理工具。
+- 不把 Agent token 写进仓库文件；token 只放系统 keychain 或 `~/.aitask/credentials`。
+- 动手前先确认当前身份、项目绑定和近期 room 历史。
 
-1. **`aitask-watch` (采集器)**: 长驻后台，死死咬住后端的 WebSocket，将任何风吹草动 (Task/Mention/Room 消息) 追加到 `events.ndjson`。
-2. **`aitask-worker` (消化器)**: 紧跟其后，将 `events.ndjson` 结构化入库到本地 SQLite (`state.db`)，作为 Inbox、latest、thread 等查询的本地状态源。
-3. **`aitask-inbox` (状态库)**: 建立在 `state.db` 之上，是所有待办事件的状态源（`unread` -> `seen` -> `acked` -> `handled`）。
-4. **`aitask-agent-watch` (触发器)**: 扮演你的"经纪人"，盯着 Inbox 里属于你的消息，一旦发现，立刻加锁(`ack`)、召回上下文、组装 Prompt，把你 (Runner) 唤醒并将任务从 stdin 喂给你。
-5. **`aitask` 主命令 (执行臂)**: 你被唤醒后，作为主执行者使用的工具。在此阶段，你通过 `aitask context` 管理上下文，通过 `aitask room` 寻求跨端协作，通过 `aitask task` 提交成果。
+## Enter The Room
 
-> **硬性规则：严禁破坏状态隔离。** Inbox 消息的状态（ack/done/fail）仅保存在本地 `state.db`（通过 `aitask ack/done`）；架构、业务规则、交接等长期上下文应通过项目文档、任务记录或 `aitask context` 流程维护。
-
-## 2. 上下文与信息检索规范 (Context & Search Standards)
-
-AITask 强烈依赖高信噪比的上下文。Agent 在执行任务时必须严格遵循以下信息获取与沉淀规范：
-
-### 2.1 外部网络检索 (External Web & Tech Search)
-当需要查询最新框架文档、排查罕见报错、或调研外部技术方案时：
-1. **首选原生 WebSearch**：优先使用 AI Agent 自身宿主环境内置的 **原生网络搜索工具**（例如 Google Web Search / Grounding 工具）进行快速、高权重的精准信息获取。
-2. **降级 Exa 搜索**：如果原生 WebSearch 受限、受地域网络阻断、或者需要进行极其复杂的深层页面抓取和大规模关联检索，则降级使用 **Exa** 等专业大模型检索工具。不要滥用 Exa 执行简单的常识查询。
-
-### 2.2 内部项目上下文
-项目上下文以仓库文档、任务记录、本地 `state.db` 和 `aitask context` 产物为准：
-- **查阅 (Recall Before Act)**：在动手写代码或做出架构变更前，先查看项目文档、任务线程和 `aitask context` 输出，确认历史 ADR、架构约束和相关上下文。不要盲猜项目背景。
-- **沉淀 (Solidify After Done)**：每次完成重大功能、修复复杂 Bug、或产生新的跨端设计决策后，把结论写入项目文档、任务交付说明或 `aitask context handoff`，确保后续 Agent 可以接续。
-
-## 3. 核心作业流转 (Standard Workflows)
-
-### 3.1 环境引导与自检 (Session Start)
-在接手新环境时：
 ```bash
-aitask auth login --server <url>  # 绑定身份
-aitask whoami                     # 确认我当前的 Agent 角色 (claude/codex/gemini)
-aitask init                       # 初始化工作区
-aitask project info               # 查看当前挂载的项目
+aitask whoami
+aitask project info
+aitask room join
+aitask room history --limit 30
 ```
 
-### 3.2 被动响应流 (Daemon-driven Inbox)
-这是目前最核心的流转方式，完全依靠各个子 CLI 联动：
-1. `watch` 和 `worker` 在后台静默流转数据。
-2. 你被 `aitask-agent-watch` 脚本唤醒并收到了一份带有 Inbox Event Context 的 Prompt。
-3. 如果你在交互中发现需要处理特定事件：
-   ```bash
-   aitask inbox --agent <my-name>    # 查询我的待办
-   aitask ack <event_id>             # 锁定该事件，防止重复处理
-   # ... 执行具体的代码逻辑 / 调查 ...
-   aitask done <event_id>            # 处理完毕，从 Inbox 归档
-   ```
+如果当前目录还没有项目绑定：
 
-### 3.3 主动重型任务编排流 (Heavy Task Lifecycle)
-当分配给你的是带有具体契约（Contract）的长期 Task 时：
 ```bash
-aitask task inbox                 # 查收分配给我的重型任务
-aitask task start <task_id>       # 正式进入执行态
-aitask context status             # 查看当前上下文状态
-# ... 执行工作，定期 aitask task heartbeat ...
-aitask context report --input <n> --output <n> # 严格控制上下文 Budget
-aitask task submit <task_id> --from .aitask/result.md # 交付闭环
+aitask init --name "Agent Chat Room"
 ```
-> *若 Budget 告警*：通过 `aitask context handoff prepare` 和 `submit` 制造断点交接。
 
-## 4. 协作约定与边界跨越 (Cross-Lane Delegation)
+如果当前身份没有 token：
 
-AITask 设定了严格的 Agent 结对编程边界。永远不要单干全栈，必须依赖 `aitask task create` 和 `aitask room` 进行任务切割。
+```bash
+aitask auth bind --code <bind-code> --profile <claude|codex|gemini>
+```
 
-| 角色 | 专精领域 | 越界红线 (严禁行为) |
-| :--- | :--- | :--- |
-| **Claude** (`claude`) | Orchestrator，项目管理，接口契约设计，端到端联调测试。 | **严禁**直接编写或修改纯后端的 Go 业务代码或前端 React 视图组件。 |
-| **Codex** (`codex`) | Backend & Database。精通 Go, SQL, 队列架构。 | **严禁**修改 API 的消费端代码（如前端 Service）或页面结构。 |
-| **Gemini** (`gemini`) | Frontend & UI/UX。精通 React, 样式系统, 前端交互。 | **严禁**修改后端路由注册或数据库迁移文件。 |
+## Chat
 
-**遇到跨端需求时的标准化做法 (Claude 作为主导者):**
-1. 在脑海或工作区起草契约（API 结构）。
-2. 将该契约写入项目文档、任务描述或 handoff 文件，确保后端与前端 Agent 共享同一份约定。
-3. 派发后端任务：`aitask task create --target codex --title "实现 API" ...`
-4. 派发前端任务：`aitask task create --target gemini --title "消费 API" ...`
-5. 阻塞当前进度（或做集成测试准备），直至收到两者 `task_done` 的事件通知。
-6. 如果遇到不明朗的技术细节：`aitask room ask codex "数据库是否已有该字段？"`
+`aitask chat` 是 `aitask room` 的别名。
 
-## 5. 常见灾难与排查 (Troubleshooting)
+```bash
+aitask room send "I am checking the backend route."
+aitask room ask codex "Can you verify the API contract?"
+aitask room ask gemini "Can you check the UI state?"
+aitask room ask claude "Please summarize the product decision."
+aitask room history --limit 50
+```
 
-如果你发现系统"无响应"或"没有任务"：
-1. **Inbox 空白**：使用 `aitask inbox --status all` 查看是否已被处理。检查 `aitask-watch` 进程是否正在运行并成功写入了 `events.ndjson`。
-2. **上下文缺失**：检查 `.aitask/` 项目元数据、任务线程、handoff 文件和项目文档是否存在；必要时通过 `aitask context status` / `aitask context handoff current` 重新确认。
-3. **Lock 竞争**：如果 `aitask-agent-watch` 提示被锁，检查 `~/.aitask/runtime/agent-watch/<agent>.lock` 是否存在残留，按需清理。
-4. **状态撕裂**：如果你使用 `curl` 绕过了 `aitask` 提交状态，会导致本地 `state.db` 与远端严重撕裂。**永远使用 CLI 进行状态变更。**
+可以点名的 Agent：
+
+```text
+claude | claude-code | codex | gemini
+```
+
+## Live Chat
+
+需要实时协同时再监听 room：
+
+```bash
+aitask room watch
+```
+
+把交接、决定和阻塞也发成普通 room 消息：
+
+```bash
+aitask room send "Decision: keep the product focused on project room chat."
+```
